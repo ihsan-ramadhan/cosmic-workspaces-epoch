@@ -662,7 +662,7 @@ fn toplevel_previews<'a>(
     toplevels: impl Iterator<Item = &'a Toplevel>,
     layout: WorkspaceLayout,
     drag_toplevel: Option<&'a backend::ExtForeignToplevelHandleV1>,
-    focused: Option<&'a cosmic::cctk::wayland_client::backend::ObjectId>,
+    focused: Option<&'a backend::ExtForeignToplevelHandleV1>,
     window_id: window::Id,
     rectangle_track: &rectangle_tracker::RectangleTracker<RectId>,
 ) -> cosmic::Element<'a, Msg> {
@@ -675,7 +675,7 @@ fn toplevel_previews<'a>(
             toplevel_previews_entry(
                 t,
                 drag_toplevel == Some(&t.handle),
-                focused == Some(&t.handle.id()),
+                focused == Some(&t.handle),
                 window_id,
                 rectangle_track,
             )

@@ -4,6 +4,7 @@
 #![allow(clippy::single_match)]
 
 use cctk::cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_v1;
+use cctk::cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1;
 use cctk::cosmic_protocols::workspace::v2::client::zcosmic_workspace_handle_v2;
 use cctk::sctk::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
 use cctk::wayland_client::protocol::wl_output;
@@ -225,7 +226,7 @@ struct App {
     rectangle_tracker: Option<RectangleTracker<RectId>>,
     rects: HashMap<RectId, Rectangle>,
     sub_ctr: u128,
-    focused: Option<ObjectId>,
+    focused: Option<ExtForeignToplevelHandleV1>,
 }
 
 #[derive(Debug, Default)]
@@ -308,7 +309,7 @@ impl App {
     }
 
     // windows shown in the overview: on an overview output, inside an active workspace
-    fn overview_toplevels(&self) -> Vec<ObjectId> {
+    fn overview_toplevels(&self) -> Vec<ExtForeignToplevelHandleV1> {
         let outputs: Vec<&wl_output::WlOutput> =
             self.layer_surfaces.values().map(|s| &s.output).collect();
         self.toplevels
@@ -322,27 +323,27 @@ impl App {
                             .is_some_and(|x| x.is_active())
                     })
             })
-            .map(|t| t.handle.id())
+            .map(|t| t.handle.clone())
             .collect()
     }
 
     // geometry comes from the rectangle tracker, so an untracked window is not reachable
-    fn focusable(&self) -> Vec<ObjectId> {
+    fn focusable(&self) -> Vec<ExtForeignToplevelHandleV1> {
         self.overview_toplevels()
             .into_iter()
             .filter(|id| {
                 self.rects
                     .keys()
-                    .any(|k| k.toplevel_id.as_ref() == Some(id))
+                    .any(|k| k.toplevel_id.as_ref() == Some(&id.id()))
             })
             .collect()
     }
 
-    fn focus_center(&self, handle: &ObjectId) -> Option<(f32, f32)> {
+    fn focus_center(&self, handle: &ExtForeignToplevelHandleV1) -> Option<(f32, f32)> {
         self.rects
             .iter()
-            .find(|(k, _)| k.toplevel_id.as_ref() == Some(handle))
-            .map(|(_, r)| (r.center_x, r.center_y))
+            .find(|(k, _)| k.toplevel_id.as_ref() == Some(&handle.id()))
+            .map(|(_, r)| (r.center_x(), r.center_y()))
     }
 
     fn move_focus(&mut self, dir: FocusDir) -> Task<cosmic::Action<Msg>> {
@@ -429,7 +430,7 @@ impl App {
                         .state
                         .contains(&zcosmic_toplevel_handle_v1::State::Activated)
                 })
-                .map(|t| t.handle.id())
+                .map(|t| t.handle.clone())
                 .or_else(|| self.overview_toplevels().into_iter().next());
             let outputs = self.outputs.clone();
             let cmd = Task::batch(
@@ -933,7 +934,7 @@ impl Application for App {
                 }
             }
             Msg::ActivateToplevel(toplevel_handle) => {
-                self.focused = Some(toplevel_handle.id());
+                self.focused = Some(toplevel_handle.clone());
                 self.send_wayland_cmd(backend::Cmd::ActivateToplevel(toplevel_handle));
                 return self.hide();
             }
@@ -1226,9 +1227,7 @@ impl Application for App {
                     Key::Named(Named::ArrowDown) => Some(Msg::MoveFocus(FocusDir::Down)),
                     Key::Named(Named::Tab) if modifiers.shift() => Some(Msg::MoveFocus(FocusDir::Prev)),
                     Key::Named(Named::Tab) => Some(Msg::MoveFocus(FocusDir::Next)),
-                    Key::Named(Named::Enter) | Key::Named(Named::Space) => {
-                        Some(Msg::ActivateFocus)
-                    }
+                    Key::Named(Named::Enter) => Some(Msg::ActivateFocus),
                     Key::Named(Named::Delete) => Some(Msg::CloseFocus),
                     Key::Character(key)
                         if !modifiers.control() && !modifiers.alt() && !modifiers.logo() =>
