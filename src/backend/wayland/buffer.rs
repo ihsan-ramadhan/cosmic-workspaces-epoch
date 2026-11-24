@@ -88,7 +88,7 @@ impl AppData {
             return Ok(None);
         };
         let drm_dev = drm_dev.unwrap_or(feedback.main_device());
-        if let Some(vulkan) = &mut self.vulkan
+        if let Some(vulkan) = self.vulkan.get_or_init_loaded()
             && let Ok(Some(name)) = vulkan.device_name(drm_dev)
         {
             // TODO Workaround: force shm on Meteor/Arrow/Lunar/Tiger Lake

@@ -58,6 +58,30 @@ pub fn subscription(conn: Connection) -> iced::Subscription<Event> {
     )
 }
 
+// loading the Vulkan ICD dominates a cold start and its only consumer is the Intel
+// workaround in buffer.rs, which runs once a dmabuf exists
+#[derive(Default)]
+pub struct LazyVulkan {
+    inner: Option<Option<vulkan::Vulkan>>,
+}
+
+impl LazyVulkan {
+    pub fn get_or_init_loaded(&mut self) -> Option<&mut vulkan::Vulkan> {
+        self.inner
+            .get_or_insert_with(|| {
+                let vulkan = vulkan::Vulkan::new();
+                if let Err(err) = &vulkan {
+                    log::info!(
+                        "Unable to initialize Vulkan: {}. Assuming no GPU workarounds needed.",
+                        err
+                    );
+                }
+                vulkan.ok()
+            })
+            .as_mut()
+    }
+}
+
 pub struct AppData {
     qh: QueueHandle<Self>,
     dmabuf_state: DmabufState,
@@ -74,7 +98,7 @@ pub struct AppData {
     dmabuf_feedback: Option<DmabufFeedback>,
     gbm_devices: GbmDevices,
     thread_pool: ThreadPool,
-    vulkan: Option<vulkan::Vulkan>,
+    vulkan: LazyVulkan,
 }
 
 impl AppData {
@@ -290,14 +314,6 @@ fn start(conn: Connection) -> mpsc::Receiver<Event> {
         // spawn an executor using one additional thread.
         let thread_pool = ThreadPool::builder().pool_size(1).create().unwrap();
 
-        let vulkan = vulkan::Vulkan::new();
-        if let Err(err) = &vulkan {
-            log::info!(
-                "Unable to initialize Vulkan: {}. Assuming now GPU workarounds needed.",
-                err
-            );
-        }
-
         let registry_state = RegistryState::new(&globals);
         let mut app_data = AppData {
             qh: qh.clone(),
@@ -315,7 +331,7 @@ fn start(conn: Connection) -> mpsc::Receiver<Event> {
             dmabuf_feedback: None,
             gbm_devices: GbmDevices::default(),
             thread_pool,
-            vulkan: vulkan.ok(),
+            vulkan: LazyVulkan::default(),
         };
 
         let (cmd_sender, cmd_channel) = calloop::channel::channel();

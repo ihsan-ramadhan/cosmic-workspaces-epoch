@@ -117,6 +117,7 @@ pub(crate) fn layer_surface<'a>(
         }),
         layout,
         drag_toplevel,
+        app.focused.as_ref(),
         window_id,
         rectangle_track,
     );
@@ -616,6 +617,7 @@ fn toplevel_preview(
 fn toplevel_previews_entry<'a>(
     toplevel: &'a Toplevel,
     is_being_dragged: bool,
+    is_focused: bool,
     window_id: window::Id,
     rectangle_track: &rectangle_tracker::RectangleTracker<RectId>,
 ) -> cosmic::Element<'a, Msg> {
@@ -634,12 +636,33 @@ fn toplevel_previews_entry<'a>(
         preview.into(),
         move || toplevel_preview(&toplevel2, true, window_id, &track),
     )
+    .apply(widget::container)
+    .class(cosmic::theme::Container::custom(move |theme| {
+        let cosmic = theme.cosmic();
+        // keyboard focus has to be visible on the window itself: the pointer stays where it was
+        let border = if is_focused {
+            Border {
+                color: cosmic.accent.base.into(),
+                width: 3.0,
+                radius: cosmic.radius_l().into(),
+            }
+        } else {
+            Border::default()
+        };
+        cosmic::iced::widget::container::Style {
+            border,
+            ..Default::default()
+        }
+    }))
+    .padding(1)
+    .into()
 }
 
 fn toplevel_previews<'a>(
     toplevels: impl Iterator<Item = &'a Toplevel>,
     layout: WorkspaceLayout,
     drag_toplevel: Option<&'a backend::ExtForeignToplevelHandleV1>,
+    focused: Option<&'a cosmic::cctk::wayland_client::backend::ObjectId>,
     window_id: window::Id,
     rectangle_track: &rectangle_tracker::RectangleTracker<RectId>,
 ) -> cosmic::Element<'a, Msg> {
@@ -652,6 +675,7 @@ fn toplevel_previews<'a>(
             toplevel_previews_entry(
                 t,
                 drag_toplevel == Some(&t.handle),
+                focused == Some(&t.handle.id()),
                 window_id,
                 rectangle_track,
             )

@@ -118,8 +118,21 @@ enum Msg {
     PanelContainerEntries(Vec<String>),
     PanelConfig(CosmicPanelConfig),
     ActionOnTyping(String),
+    MoveFocus(FocusDir),
+    ActivateFocus,
+    CloseFocus,
     Ignore,
     Rectangle(RectangleUpdate<RectId>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+    Next,
+    Prev,
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +225,7 @@ struct App {
     rectangle_tracker: Option<RectangleTracker<RectId>>,
     rects: HashMap<RectId, Rectangle>,
     sub_ctr: u128,
+    focused: Option<ObjectId>,
 }
 
 #[derive(Debug, Default)]
@@ -293,9 +307,130 @@ impl App {
         }
     }
 
+    // windows shown in the overview: on an overview output, inside an active workspace
+    fn overview_toplevels(&self) -> Vec<ObjectId> {
+        let outputs: Vec<&wl_output::WlOutput> =
+            self.layer_surfaces.values().map(|s| &s.output).collect();
+        self.toplevels
+            .0
+            .iter()
+            .filter(|t| {
+                t.info.output.iter().any(|o| outputs.contains(&o))
+                    && t.info.workspace.iter().any(|w| {
+                        self.workspaces
+                            .for_handle(w)
+                            .is_some_and(|x| x.is_active())
+                    })
+            })
+            .map(|t| t.handle.id())
+            .collect()
+    }
+
+    // geometry comes from the rectangle tracker, so an untracked window is not reachable
+    fn focusable(&self) -> Vec<ObjectId> {
+        self.overview_toplevels()
+            .into_iter()
+            .filter(|id| {
+                self.rects
+                    .keys()
+                    .any(|k| k.toplevel_id.as_ref() == Some(id))
+            })
+            .collect()
+    }
+
+    fn focus_center(&self, handle: &ObjectId) -> Option<(f32, f32)> {
+        self.rects
+            .iter()
+            .find(|(k, _)| k.toplevel_id.as_ref() == Some(handle))
+            .map(|(_, r)| (r.center_x, r.center_y))
+    }
+
+    fn move_focus(&mut self, dir: FocusDir) -> Task<cosmic::Action<Msg>> {
+        let candidates = self.focusable();
+        if candidates.is_empty() {
+            return Task::none();
+        }
+        let current = self
+            .focused
+            .clone()
+            .filter(|f| candidates.contains(f));
+        let next = match dir {
+            FocusDir::Next | FocusDir::Prev => {
+                let idx = current
+                    .as_ref()
+                    .and_then(|c| candidates.iter().position(|x| x == c));
+                let len = candidates.len();
+                let next_idx = match (dir, idx) {
+                    (FocusDir::Next, Some(i)) => (i + 1) % len,
+                    (FocusDir::Prev, Some(i)) => (i + len - 1) % len,
+                    (FocusDir::Next, None) => 0,
+                    (FocusDir::Prev, None) => len - 1,
+                    _ => 0,
+                };
+                candidates[next_idx].clone()
+            }
+            _ => {
+                let Some(from) = current.as_ref().and_then(|c| self.focus_center(c)) else {
+                    self.focused = Some(candidates[0].clone());
+                    return Task::none();
+                };
+                let best = candidates
+                    .iter()
+                    .filter(|c| Some(*c) != current.as_ref())
+                    .filter_map(|c| {
+                        let (x, y) = self.focus_center(c)?;
+                        let (dx, dy) = (x - from.0, y - from.1);
+                        // candidates must lie in the pressed direction, measured off-axis so a
+                        // window diagonally away does not win over a straight neighbor
+                        let (primary, secondary) = match dir {
+                            FocusDir::Right => (dx, dy.abs()),
+                            FocusDir::Left => (-dx, dy.abs()),
+                            FocusDir::Down => (dy, dx.abs()),
+                            FocusDir::Up => (-dy, dx.abs()),
+                            _ => return None,
+                        };
+                        (primary > 1.0).then_some((primary + secondary * 0.5, c.clone()))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                match best {
+                    Some((_, c)) => c,
+                    None => return Task::none(),
+                }
+            }
+        };
+        self.focused = Some(next);
+        Task::none()
+    }
+
+    fn activate_focused(&mut self) -> Task<cosmic::Action<Msg>> {
+        if let Some(handle) = self.focused.clone() {
+            self.send_wayland_cmd(backend::Cmd::ActivateToplevel(handle));
+        }
+        self.hide()
+    }
+
+    fn close_focused(&mut self) -> Task<cosmic::Action<Msg>> {
+        if let Some(handle) = self.focused.clone() {
+            self.send_wayland_cmd(backend::Cmd::CloseToplevel(handle));
+        }
+        Task::none()
+    }
+
     fn show(&mut self) -> Task<cosmic::Action<Msg>> {
         if !self.visible {
             self.visible = true;
+            // start on the window that already has focus, so one Return re-selects it
+            self.focused = self
+                .toplevels
+                .0
+                .iter()
+                .find(|t| {
+                    t.info
+                        .state
+                        .contains(&zcosmic_toplevel_handle_v1::State::Activated)
+                })
+                .map(|t| t.handle.id())
+                .or_else(|| self.overview_toplevels().into_iter().next());
             let outputs = self.outputs.clone();
             let cmd = Task::batch(
                 outputs
@@ -798,9 +933,13 @@ impl Application for App {
                 }
             }
             Msg::ActivateToplevel(toplevel_handle) => {
+                self.focused = Some(toplevel_handle.id());
                 self.send_wayland_cmd(backend::Cmd::ActivateToplevel(toplevel_handle));
                 return self.hide();
             }
+            Msg::MoveFocus(dir) => return self.move_focus(dir),
+            Msg::ActivateFocus => return self.activate_focused(),
+            Msg::CloseFocus => return self.close_focused(),
             Msg::CloseWorkspace(_workspace_handle) => {
                 // XXX close specific workspace
                 /*
@@ -1079,12 +1218,25 @@ impl Application for App {
                 key: Key::Named(Named::Escape),
                 ..
             }) => Some(Msg::Close),
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key: Key::Character(key),
-                modifiers,
-                ..
-            }) if !modifiers.control() && !modifiers.alt() && !modifiers.logo() => {
-                Some(Msg::ActionOnTyping(key.to_string()))
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                match key.as_ref() {
+                    Key::Named(Named::ArrowLeft) => Some(Msg::MoveFocus(FocusDir::Left)),
+                    Key::Named(Named::ArrowRight) => Some(Msg::MoveFocus(FocusDir::Right)),
+                    Key::Named(Named::ArrowUp) => Some(Msg::MoveFocus(FocusDir::Up)),
+                    Key::Named(Named::ArrowDown) => Some(Msg::MoveFocus(FocusDir::Down)),
+                    Key::Named(Named::Tab) if modifiers.shift() => Some(Msg::MoveFocus(FocusDir::Prev)),
+                    Key::Named(Named::Tab) => Some(Msg::MoveFocus(FocusDir::Next)),
+                    Key::Named(Named::Enter) | Key::Named(Named::Space) => {
+                        Some(Msg::ActivateFocus)
+                    }
+                    Key::Named(Named::Delete) => Some(Msg::CloseFocus),
+                    Key::Character(key)
+                        if !modifiers.control() && !modifiers.alt() && !modifiers.logo() =>
+                    {
+                        Some(Msg::ActionOnTyping(key.to_string()))
+                    }
+                    _ => None,
+                }
             }
             // XXX Workaround for `on_finish`/`on_cancel` not being called, seemingly
             // due to state diffing behavior.
