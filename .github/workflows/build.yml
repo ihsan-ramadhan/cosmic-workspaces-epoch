@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  push:
+    branches: [epoch-1.11.0, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libegl-dev libgbm-dev libinput-dev libudev-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libexpat1-dev \
+            libvulkan-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+        continue-on-error: true
+
+      - name: Format
+        run: cargo fmt --check
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cosmic-workspaces-x86_64
+          path: target/release/cosmic-workspaces
+          if-no-files-found: error
